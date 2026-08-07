@@ -1,36 +1,56 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# SkyMap LIMS
 
-## Getting Started
+Enterprise pharmaceutical Laboratory Information Management System built with Next.js 15, TypeScript, Tailwind CSS, shadcn/ui, and Firebase.
 
-First, run the development server:
+## Features
+
+- Firebase Authentication with role-based access (Admin, QA, QC, Reviewer, Analyst, Viewer)
+- Master data modules (12)
+- Sample management with barcode/QR, attachments, analyst assignment
+- Testing workflow with results, retest, review, approval, e-signature
+- COA / report generation with PDF/Excel/CSV export
+- Activity logs and audit trail
+- Global search, notifications, dark/light mode, responsive layout
+
+## Setup
+
+1. Install dependencies:
+
+```bash
+npm install
+```
+
+2. Firebase config is in `.env.local` (already filled from your project keys).
+
+3. In Firebase Console (`lims-skymap`):
+   - Enable **Email/Password** authentication
+   - Create Firestore database
+   - Enable Storage
+   - Deploy rules:
+
+```bash
+npx -y firebase-tools@latest login
+npx -y firebase-tools@latest use lims-skymap
+npx -y firebase-tools@latest deploy --only firestore:rules,storage
+```
+
+4. Create your first user in Firebase Authentication (Email/Password). On first login, an Admin profile is auto-provisioned in `users/{uid}`.
+
+5. Run the app:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Scripts
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- `npm run dev` — development server
+- `npm run build` — production build
+- `npm run start` — start production server
+- `npm run lint` — ESLint
 
-## Learn More
+## Collections
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+`users`, `departments`, `laboratories`, `products`, `customers`, `materials`, `sampleTypes`, `storageConditions`, `units`, `methods`, `instruments`, `specifications`, `testMasters`, `samples`, `tests`, `reports`, `activities`, `auditTrail`, `notifications`, `counters`

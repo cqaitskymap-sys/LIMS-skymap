@@ -1,0 +1,131 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isActiveUser() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && userDoc().isActive != false;
+    }
+
+    function role() {
+      return userDoc().role;
+    }
+
+    function isAdmin() {
+      return isActiveUser() && role() == 'admin';
+    }
+
+    function canWriteOps() {
+      return isActiveUser() && role() in ['admin', 'qa', 'qc', 'reviewer', 'analyst'];
+    }
+
+    function canManageMasters() {
+      return isActiveUser() && role() in ['admin', 'qa'];
+    }
+
+    match /users/{userId} {
+      allow read: if isActiveUser() || (isSignedIn() && request.auth.uid == userId);
+      allow create: if isAdmin() || (isSignedIn() && request.auth.uid == userId);
+      allow update: if isAdmin()
+        || (isSignedIn() && request.auth.uid == userId
+            && !request.resource.data.diff(resource.data).affectedKeys()
+                .hasAny(['role', 'isActive']));
+      allow delete: if isAdmin();
+    }
+
+    match /departments/{id} {
+      allow read: if isActiveUser();
+      allow write: if canManageMasters();
+    }
+    match /laboratories/{id} {
+      allow read: if isActiveUser();
+      allow write: if canManageMasters();
+    }
+    match /products/{id} {
+      allow read: if isActiveUser();
+      allow write: if canManageMasters();
+    }
+    match /customers/{id} {
+      allow read: if isActiveUser();
+      allow write: if canManageMasters();
+    }
+    match /materials/{id} {
+      allow read: if isActiveUser();
+      allow write: if canManageMasters();
+    }
+    match /sampleTypes/{id} {
+      allow read: if isActiveUser();
+      allow write: if canManageMasters();
+    }
+    match /storageConditions/{id} {
+      allow read: if isActiveUser();
+      allow write: if canManageMasters();
+    }
+    match /units/{id} {
+      allow read: if isActiveUser();
+      allow write: if canManageMasters();
+    }
+    match /methods/{id} {
+      allow read: if isActiveUser();
+      allow write: if canManageMasters();
+    }
+    match /instruments/{id} {
+      allow read: if isActiveUser();
+      allow write: if canManageMasters();
+    }
+    match /specifications/{id} {
+      allow read: if isActiveUser();
+      allow write: if canManageMasters();
+    }
+    match /testMasters/{id} {
+      allow read: if isActiveUser();
+      allow write: if canManageMasters();
+    }
+    match /roles/{id} {
+      allow read: if isActiveUser();
+      allow write: if isAdmin();
+    }
+    match /counters/{id} {
+      allow read, write: if canWriteOps();
+    }
+    match /samples/{id} {
+      allow read: if isActiveUser();
+      allow create, update: if canWriteOps();
+      allow delete: if canManageMasters();
+    }
+    match /tests/{id} {
+      allow read: if isActiveUser();
+      allow create, update: if canWriteOps();
+      allow delete: if canManageMasters();
+    }
+    match /reports/{id} {
+      allow read: if isActiveUser();
+      allow create, update: if canWriteOps();
+      allow delete: if canManageMasters();
+    }
+    match /activities/{id} {
+      allow read: if isActiveUser();
+      allow create: if isActiveUser();
+      allow update, delete: if isAdmin();
+    }
+    match /auditTrail/{id} {
+      allow read: if isActiveUser();
+      allow create: if isActiveUser();
+      allow update, delete: if false;
+    }
+    match /notifications/{id} {
+      allow read: if isActiveUser() && resource.data.userId == request.auth.uid;
+      allow create: if isActiveUser();
+      allow update: if isActiveUser() && resource.data.userId == request.auth.uid;
+      allow delete: if isAdmin();
+    }
+  }
+}
