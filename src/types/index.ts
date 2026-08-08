@@ -43,7 +43,9 @@ export interface AppUser extends BaseEntity {
   displayName: string;
   role: UserRole;
   departmentId?: string;
+  departmentName?: string;
   laboratoryId?: string;
+  laboratoryName?: string;
   phone?: string;
   avatarUrl?: string;
   isActive: boolean;
@@ -62,8 +64,10 @@ export interface Laboratory extends BaseEntity {
   name: string;
   location?: string;
   departmentId?: string;
+  departmentName?: string;
   accreditation?: string;
   contactEmail?: string;
+  description?: string;
 }
 
 export interface Product extends BaseEntity {
@@ -72,6 +76,7 @@ export interface Product extends BaseEntity {
   dosageForm?: string;
   strength?: string;
   customerId?: string;
+  customerName?: string;
   description?: string;
 }
 
@@ -96,6 +101,7 @@ export interface Material extends BaseEntity {
 export interface SampleType extends BaseEntity {
   code: string;
   name: string;
+  category?: string;
   description?: string;
   retentionDays?: number;
 }
@@ -103,6 +109,7 @@ export interface SampleType extends BaseEntity {
 export interface StorageCondition extends BaseEntity {
   code: string;
   name: string;
+  category?: string;
   temperature?: string;
   humidity?: string;
   description?: string;
@@ -112,6 +119,7 @@ export interface Unit extends BaseEntity {
   code: string;
   name: string;
   symbol: string;
+  category?: string;
   description?: string;
 }
 
@@ -119,6 +127,7 @@ export interface Method extends BaseEntity {
   code: string;
   name: string;
   version?: string;
+  category?: string;
   description?: string;
   sopReference?: string;
 }
@@ -131,6 +140,7 @@ export interface Instrument extends BaseEntity {
   serialNumber?: string;
   calibrationDue?: string;
   laboratoryId?: string;
+  laboratoryName?: string;
   status?: "available" | "in_use" | "maintenance" | "retired";
 }
 
@@ -150,7 +160,9 @@ export interface TestMaster extends BaseEntity {
   name: string;
   category?: string;
   methodId?: string;
+  methodName?: string;
   instrumentId?: string;
+  instrumentName?: string;
   estimatedHours?: number;
   parameters: TestParameter[];
   description?: string;
@@ -160,6 +172,7 @@ export interface Specification extends BaseEntity {
   code: string;
   name: string;
   productId?: string;
+  productName?: string;
   version?: string;
   effectiveDate?: string;
   testIds: string[];
@@ -192,6 +205,7 @@ export interface Sample extends BaseEntity {
   quantity?: number;
   unitId?: string;
   storageConditionId?: string;
+  storageConditionName?: string;
   receivedDate: string;
   dueDate?: string;
   priority: Priority;
@@ -302,6 +316,8 @@ export interface MasterField {
   placeholder?: string;
   options?: { label: string; value: string }[];
   searchable?: boolean;
+  referenceCollection?: string;
+  referenceLabelKey?: string;
 }
 
 export interface MasterConfig {

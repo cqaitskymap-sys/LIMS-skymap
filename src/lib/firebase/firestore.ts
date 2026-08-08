@@ -56,15 +56,18 @@ export async function getById<T extends BaseEntity>(
   return mapDoc<T>(snap.id, snap.data());
 }
 
+const DEFAULT_LIST_LIMIT = 500;
+
 export async function listDocuments<T extends BaseEntity>(
   collectionName: string,
-  constraints: QueryConstraint[] = []
+  constraints: QueryConstraint[] = [],
+  maxDocs = DEFAULT_LIST_LIMIT
 ): Promise<T[]> {
   const q = query(
     collection(db, collectionName),
     ...constraints,
     orderBy("updatedAt", "desc"),
-    limit(500)
+    limit(maxDocs)
   );
   const snap = await getDocs(q);
   return snap.docs.map((d) => mapDoc<T>(d.id, d.data()));
@@ -72,15 +75,17 @@ export async function listDocuments<T extends BaseEntity>(
 
 export async function listDocumentsSafe<T extends BaseEntity>(
   collectionName: string,
-  constraints: QueryConstraint[] = []
+  constraints: QueryConstraint[] = [],
+  maxDocs = DEFAULT_LIST_LIMIT
 ): Promise<T[]> {
   try {
-    return await listDocuments<T>(collectionName, constraints);
+    return await listDocuments<T>(collectionName, constraints, maxDocs);
   } catch {
     const snap = await getDocs(collection(db, collectionName));
     return snap.docs
       .map((d) => mapDoc<T>(d.id, d.data()))
-      .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+      .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+      .slice(0, maxDocs);
   }
 }
 
@@ -139,7 +144,7 @@ export async function logAudit(
 }
 
 export async function createNotification(
-  notification: Omit<AppNotification, "id" | "createdAt" | "updatedAt">
+  notification: Omit<AppNotification, "id" | "createdAt" | "updatedAt" | "isRead">
 ) {
   await createDocument(COLLECTIONS.notifications, {
     ...notification,

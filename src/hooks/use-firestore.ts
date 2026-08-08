@@ -6,7 +6,8 @@ import type { BaseEntity } from "@/types";
 
 export function useCollection<T extends BaseEntity>(
   collectionName: string,
-  refreshKey = 0
+  refreshKey = 0,
+  maxDocs?: number
 ) {
   const [data, setData] = useState<T[]>([]);
   const [loading, setLoading] = useState(true);
@@ -16,7 +17,7 @@ export function useCollection<T extends BaseEntity>(
     let active = true;
     setLoading(true);
     setError(null);
-    listDocumentsSafe<T>(collectionName)
+    listDocumentsSafe<T>(collectionName, [], maxDocs)
       .then((rows) => {
         if (active) setData(rows);
       })
@@ -29,7 +30,7 @@ export function useCollection<T extends BaseEntity>(
     return () => {
       active = false;
     };
-  }, [collectionName, refreshKey]);
+  }, [collectionName, refreshKey, maxDocs]);
 
   const activeOnly = useMemo(
     () => data.filter((row) => row.isActive !== false),

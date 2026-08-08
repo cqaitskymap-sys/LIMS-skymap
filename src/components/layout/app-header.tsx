@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   Bell,
   LogOut,
@@ -25,32 +25,52 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { useDebouncedValue } from "@/hooks/use-firestore";
-import { listDocumentsSafe } from "@/lib/firebase/firestore";
-import { COLLECTIONS, ROLE_LABELS } from "@/lib/constants";
-import type { AppNotification } from "@/types";
+import { ROLE_LABELS } from "@/lib/constants";
+import { MIN_SEARCH_LENGTH } from "@/lib/search";
+import { useUnreadNotificationCount } from "@/hooks/use-notifications";
+
+function GlobalSearchInput() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const params = useSearchParams();
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    if (pathname === "/search") {
+      setQuery(params.get("q") || "");
+    }
+  }, [pathname, params]);
+
+  const submitSearch = () => {
+    const q = query.trim();
+    if (q.length >= MIN_SEARCH_LENGTH) {
+      router.push(`/search?q=${encodeURIComponent(q)}`);
+      return;
+    }
+    router.push("/search");
+  };
+
+  return (
+    <div className="relative hidden min-w-0 flex-1 sm:block md:max-w-md lg:max-w-lg">
+      <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+      <Input
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") submitSearch();
+        }}
+        placeholder="Search samples, tests, reports..."
+        className="h-10 rounded-xl bg-muted/40 pl-9"
+        aria-label="Global search"
+      />
+    </div>
+  );
+}
 
 export function AppHeader() {
   const router = useRouter();
   const { profile, logout } = useAuth();
-  const [query, setQuery] = useState("");
-  const debounced = useDebouncedValue(query, 350);
-  const [unread, setUnread] = useState(0);
-
-  useEffect(() => {
-    if (!profile?.uid) return;
-    listDocumentsSafe<AppNotification>(COLLECTIONS.notifications)
-      .then((rows) => {
-        setUnread(rows.filter((n) => n.userId === profile.uid && !n.isRead).length);
-      })
-      .catch(() => setUnread(0));
-  }, [profile?.uid]);
-
-  useEffect(() => {
-    if (debounced.trim().length >= 2) {
-      router.push(`/search?q=${encodeURIComponent(debounced.trim())}`);
-    }
-  }, [debounced, router]);
+  const unread = useUnreadNotificationCount(profile?.uid);
 
   const initials = useMemo(() => {
     const name = profile?.displayName || "U";
@@ -65,16 +85,19 @@ export function AppHeader() {
   return (
     <header className="sticky top-0 z-30 flex h-16 items-center gap-3 border-b border-border/80 bg-background/90 px-3 backdrop-blur md:px-5">
       <SidebarTrigger className="shrink-0" />
-      <div className="relative hidden min-w-0 flex-1 sm:block md:max-w-md lg:max-w-lg">
-        <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search samples, tests, reports..."
-          className="h-10 rounded-xl bg-muted/40 pl-9"
-          aria-label="Global search"
-        />
-      </div>
+      <Suspense
+        fallback={
+          <div className="relative hidden min-w-0 flex-1 sm:block md:max-w-md lg:max-w-lg">
+            <Input
+              disabled
+              placeholder="Search samples, tests, reports..."
+              className="h-10 rounded-xl bg-muted/40 pl-9"
+            />
+          </div>
+        }
+      >
+        <GlobalSearchInput />
+      </Suspense>
       <div className="ml-auto flex items-center gap-1.5">
         <Button
           variant="ghost"

@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import {
+  AlertCircle,
   CheckCircle2,
   ClipboardPlus,
   FilePlus2,
@@ -16,6 +17,7 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
+  Legend,
   Pie,
   PieChart,
   ResponsiveContainer,
@@ -25,15 +27,21 @@ import {
 } from "recharts";
 import { useCollection } from "@/hooks/use-firestore";
 import { COLLECTIONS } from "@/lib/constants";
-import { formatDateTime } from "@/lib/utils";
+import { formatDateTime, formatLocalDateKey } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
-import { PageShell, StatCardSkeleton } from "@/components/shared/states";
-import { StatusBadge } from "@/components/shared/status-badge";
+import {
+  ErrorState,
+  PageShell,
+  StatCardSkeleton,
+} from "@/components/shared/states";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type { ActivityLog, AppUser, LabTest, Report, Sample } from "@/types";
 
 const COLORS = ["#2563eb", "#0ea5e9", "#10b981", "#f59e0b", "#ef4444", "#6366f1", "#14b8a6"];
+const DASHBOARD_FETCH_LIMIT = 5000;
+const PENDING_SAMPLE_STATUSES = ["received", "pending", "in_testing", "in_review"];
 
 function StatCard({
   title,
@@ -67,21 +75,42 @@ function StatCard({
   );
 }
 
+function formatEntityType(entityType: string) {
+  return entityType.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 export default function DashboardPage() {
-  const { data: samples, loading: loadingSamples } = useCollection<Sample>(
-    COLLECTIONS.samples
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const {
+    data: samples,
+    loading: loadingSamples,
+    error: errorSamples,
+  } = useCollection<Sample>(COLLECTIONS.samples, refreshKey, DASHBOARD_FETCH_LIMIT);
+  const {
+    data: tests,
+    loading: loadingTests,
+    error: errorTests,
+  } = useCollection<LabTest>(COLLECTIONS.tests, refreshKey, DASHBOARD_FETCH_LIMIT);
+  const {
+    data: reports,
+    loading: loadingReports,
+    error: errorReports,
+  } = useCollection<Report>(COLLECTIONS.reports, refreshKey, DASHBOARD_FETCH_LIMIT);
+  const {
+    data: users,
+    loading: loadingUsers,
+    error: errorUsers,
+  } = useCollection<AppUser>(COLLECTIONS.users, refreshKey, DASHBOARD_FETCH_LIMIT);
+  const {
+    data: activities,
+    loading: loadingActivities,
+    error: errorActivities,
+  } = useCollection<ActivityLog>(
+    COLLECTIONS.activities,
+    refreshKey,
+    DASHBOARD_FETCH_LIMIT
   );
-  const { data: tests, loading: loadingTests } = useCollection<LabTest>(
-    COLLECTIONS.tests
-  );
-  const { data: reports, loading: loadingReports } = useCollection<Report>(
-    COLLECTIONS.reports
-  );
-  const { data: users, loading: loadingUsers } = useCollection<AppUser>(
-    COLLECTIONS.users
-  );
-  const { data: activities, loading: loadingActivities } =
-    useCollection<ActivityLog>(COLLECTIONS.activities);
 
   const loading =
     loadingSamples ||
@@ -90,11 +119,14 @@ export default function DashboardPage() {
     loadingUsers ||
     loadingActivities;
 
-  const today = new Date().toISOString().slice(0, 10);
+  const error =
+    errorSamples || errorTests || errorReports || errorUsers || errorActivities;
+
+  const today = formatLocalDateKey();
 
   const stats = useMemo(() => {
     const pendingSamples = samples.filter((s) =>
-      ["received", "pending", "in_testing"].includes(s.status)
+      PENDING_SAMPLE_STATUSES.includes(s.status)
     ).length;
     const completedTests = tests.filter((t) =>
       ["approved", "released"].includes(t.status)
@@ -119,6 +151,13 @@ export default function DashboardPage() {
       laboratoryUsers: users.filter((u) => u.isActive !== false).length,
     };
   }, [samples, tests, reports, users, today]);
+
+  const isTruncated =
+    samples.length >= DASHBOARD_FETCH_LIMIT ||
+    tests.length >= DASHBOARD_FETCH_LIMIT ||
+    reports.length >= DASHBOARD_FETCH_LIMIT ||
+    users.length >= DASHBOARD_FETCH_LIMIT ||
+    activities.length >= DASHBOARD_FETCH_LIMIT;
 
   const sampleStatusData = useMemo(() => {
     const map = new Map<string, number>();
@@ -156,13 +195,19 @@ export default function DashboardPage() {
     }));
   }, [tests, reports]);
 
-  const recentActivities = activities.slice(0, 8);
+  const recentActivities = useMemo(
+    () =>
+      [...activities]
+        .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""))
+        .slice(0, 8),
+    [activities]
+  );
 
   return (
     <PageShell>
       <PageHeader
         title="Dashboard"
-        description="Real-time overview of laboratory operations and quality workflows."
+        description="Overview of laboratory operations and quality workflows."
         breadcrumbs={[{ label: "Dashboard" }]}
       />
 
@@ -172,8 +217,24 @@ export default function DashboardPage() {
             <StatCardSkeleton key={i} />
           ))}
         </div>
+      ) : error ? (
+        <ErrorState
+          title="Failed to load dashboard"
+          description={error}
+          onRetry={() => setRefreshKey((k) => k + 1)}
+        />
       ) : (
         <>
+          {isTruncated && (
+            <div className="mb-4 flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
+              <AlertCircle className="mt-0.5 size-4 shrink-0" />
+              <p>
+                Some metrics are based on the latest {DASHBOARD_FETCH_LIMIT.toLocaleString()}{" "}
+                records per collection. Counts may be lower than actual totals for large datasets.
+              </p>
+            </div>
+          )}
+
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <StatCard title="Total Samples" value={stats.totalSamples} icon={FlaskConical} />
             <StatCard
@@ -234,6 +295,13 @@ export default function DashboardPage() {
                         ))}
                       </Pie>
                       <Tooltip />
+                      <Legend
+                        verticalAlign="bottom"
+                        iconType="circle"
+                        formatter={(value) =>
+                          String(value).replace(/\b\w/g, (c) => c.toUpperCase())
+                        }
+                      />
                     </PieChart>
                   </ResponsiveContainer>
                 )}
@@ -245,15 +313,19 @@ export default function DashboardPage() {
                 <CardTitle className="text-base">Monthly Samples</CardTitle>
               </CardHeader>
               <CardContent className="h-64">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={monthlyData}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                    <XAxis dataKey="label" tickLine={false} axisLine={false} />
-                    <YAxis allowDecimals={false} tickLine={false} axisLine={false} />
-                    <Tooltip />
-                    <Bar dataKey="count" fill="#2563eb" radius={[8, 8, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
+                {monthlyData.every((m) => m.count === 0) ? (
+                  <p className="text-sm text-muted-foreground">No sample data yet</p>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={monthlyData}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                      <XAxis dataKey="label" tickLine={false} axisLine={false} />
+                      <YAxis allowDecimals={false} tickLine={false} axisLine={false} />
+                      <Tooltip />
+                      <Bar dataKey="count" fill="#2563eb" radius={[8, 8, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                )}
               </CardContent>
             </Card>
 
@@ -262,16 +334,30 @@ export default function DashboardPage() {
                 <CardTitle className="text-base">Approval Status</CardTitle>
               </CardHeader>
               <CardContent className="h-64">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={approvalData}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                    <XAxis dataKey="name" tickLine={false} axisLine={false} hide />
-                    <YAxis allowDecimals={false} tickLine={false} axisLine={false} />
-                    <Tooltip />
-                    <Bar dataKey="tests" fill="#2563eb" radius={[6, 6, 0, 0]} />
-                    <Bar dataKey="reports" fill="#0ea5e9" radius={[6, 6, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
+                {approvalData.every((row) => row.tests === 0 && row.reports === 0) ? (
+                  <p className="text-sm text-muted-foreground">No approval data yet</p>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={approvalData} margin={{ bottom: 8 }}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                      <XAxis
+                        dataKey="name"
+                        tickLine={false}
+                        axisLine={false}
+                        tick={{ fontSize: 11 }}
+                        interval={0}
+                        angle={-25}
+                        textAnchor="end"
+                        height={50}
+                      />
+                      <YAxis allowDecimals={false} tickLine={false} axisLine={false} />
+                      <Tooltip />
+                      <Legend />
+                      <Bar dataKey="tests" name="Tests" fill="#2563eb" radius={[6, 6, 0, 0]} />
+                      <Bar dataKey="reports" name="Reports" fill="#0ea5e9" radius={[6, 6, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                )}
               </CardContent>
             </Card>
           </div>
@@ -283,21 +369,21 @@ export default function DashboardPage() {
               </CardHeader>
               <CardContent className="grid gap-2">
                 <Button asChild className="h-11 justify-start rounded-xl">
-                  <Link href="/samples">
+                  <Link href="/samples?action=create">
                     <FlaskConical className="mr-2 size-4" />
-                    Add Sample
+                    Manage Samples
                   </Link>
                 </Button>
                 <Button asChild variant="outline" className="h-11 justify-start rounded-xl">
                   <Link href="/testing">
                     <ClipboardPlus className="mr-2 size-4" />
-                    Create Test
+                    Manage Tests
                   </Link>
                 </Button>
                 <Button asChild variant="outline" className="h-11 justify-start rounded-xl">
                   <Link href="/reports">
                     <FilePlus2 className="mr-2 size-4" />
-                    Generate Report
+                    Manage Reports
                   </Link>
                 </Button>
                 <Button asChild variant="outline" className="h-11 justify-start rounded-xl">
@@ -333,7 +419,9 @@ export default function DashboardPage() {
                         </p>
                       </div>
                       <div className="shrink-0 text-right">
-                        <StatusBadge status="pending" label={item.entityType} />
+                        <Badge variant="secondary" className="rounded-full capitalize">
+                          {formatEntityType(item.entityType)}
+                        </Badge>
                         <p className="mt-1 text-[11px] text-muted-foreground">
                           {formatDateTime(item.createdAt)}
                         </p>

@@ -12,6 +12,7 @@ import {
   Download,
   Eye,
   MoreHorizontal,
+  Pencil,
   Plus,
   Search,
   Trash2,
@@ -26,18 +27,21 @@ import {
 import {
   createDocument,
   getNextSequence,
-  hardDeleteDocument,
   logActivity,
   logAudit,
+  softDeleteDocument,
+  updateDocument,
   uploadFile,
 } from "@/lib/firebase/firestore";
-import { generateSampleNumber, formatDate } from "@/lib/utils";
+import { notifySampleAssigned } from "@/lib/notifications";
+import { formatDate, formatLocalDateKey, generateSampleNumber } from "@/lib/utils";
 import { exportToCsv, exportToExcel, exportToPdf } from "@/lib/export";
 import {
   useCollection,
   useDebouncedValue,
   usePagination,
 } from "@/hooks/use-firestore";
+import { useSearchQueryParam } from "@/hooks/use-search-query";
 import { PageHeader } from "@/components/shared/page-header";
 import {
   EmptyState,
@@ -88,51 +92,92 @@ import type {
   SampleStatus,
   Priority,
   SampleType,
+  StorageCondition,
 } from "@/types";
 
-const schema = z.object({
-  productId: z.string().optional(),
-  customerId: z.string().optional(),
-  sampleTypeId: z.string().optional(),
-  batchNumber: z.string().optional(),
-  lotNumber: z.string().optional(),
-  quantity: z.string().optional(),
-  receivedDate: z.string().min(1, "Received date is required"),
-  dueDate: z.string().optional(),
-  priority: z.enum(["low", "normal", "high", "urgent"]),
-  status: z.enum([
-    "received",
-    "pending",
-    "in_testing",
-    "in_review",
-    "approved",
-    "rejected",
-    "cancelled",
-    "released",
-  ]),
-  assignedAnalystId: z.string().optional(),
-  remarks: z.string().optional(),
-});
+const SAMPLE_FETCH_LIMIT = 5000;
+
+const schema = z
+  .object({
+    productId: z.string().optional(),
+    customerId: z.string().optional(),
+    sampleTypeId: z.string().optional(),
+    storageConditionId: z.string().optional(),
+    batchNumber: z.string().optional(),
+    lotNumber: z.string().optional(),
+    quantity: z
+      .string()
+      .optional()
+      .refine(
+        (value) =>
+          !value ||
+          (!Number.isNaN(Number(value)) && Number(value) > 0),
+        "Quantity must be a positive number"
+      ),
+    receivedDate: z.string().min(1, "Received date is required"),
+    dueDate: z.string().optional(),
+    priority: z.enum(["low", "normal", "high", "urgent"]),
+    status: z.enum([
+      "received",
+      "pending",
+      "in_testing",
+      "in_review",
+      "approved",
+      "rejected",
+      "cancelled",
+      "released",
+    ]),
+    assignedAnalystId: z.string().optional(),
+    remarks: z.string().optional(),
+  })
+  .refine(
+    (values) =>
+      !values.dueDate ||
+      !values.receivedDate ||
+      values.dueDate >= values.receivedDate,
+    {
+      message: "Due date cannot be before received date",
+      path: ["dueDate"],
+    }
+  );
 
 type FormValues = z.infer<typeof schema>;
+
+const TERMINAL_STATUSES: SampleStatus[] = [
+  "approved",
+  "released",
+  "cancelled",
+  "rejected",
+];
+
+function isSampleOverdue(sample: Sample) {
+  if (!sample.dueDate || TERMINAL_STATUSES.includes(sample.status)) return false;
+  return sample.dueDate < formatLocalDateKey();
+}
 
 export default function SamplesPage() {
   const { profile, hasPermission } = useAuth();
   const [refreshKey, setRefreshKey] = useState(0);
   const { data, loading, error } = useCollection<Sample>(
     COLLECTIONS.samples,
-    refreshKey
+    refreshKey,
+    SAMPLE_FETCH_LIMIT
   );
   const { data: products } = useCollection<Product>(COLLECTIONS.products);
   const { data: customers } = useCollection<Customer>(COLLECTIONS.customers);
   const { data: sampleTypes } = useCollection<SampleType>(COLLECTIONS.sampleTypes);
+  const { data: storageConditions } = useCollection<StorageCondition>(
+    COLLECTIONS.storageConditions
+  );
   const { data: users } = useCollection<AppUser>(COLLECTIONS.users);
 
   const [search, setSearch] = useState("");
+  useSearchQueryParam(setSearch);
   const [statusFilter, setStatusFilter] = useState("all");
   const [priorityFilter, setPriorityFilter] = useState("all");
   const debounced = useDebouncedValue(search);
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<Sample | null>(null);
   const [detail, setDetail] = useState<Sample | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState("");
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
@@ -143,11 +188,33 @@ export default function SamplesPage() {
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
     defaultValues: {
-      receivedDate: new Date().toISOString().slice(0, 10),
+      receivedDate: formatLocalDateKey(),
       priority: "normal",
       status: "received",
     },
   });
+
+  const activeSamples = useMemo(
+    () => data.filter((sample) => sample.isActive !== false),
+    [data]
+  );
+
+  const activeProducts = useMemo(
+    () => products.filter((item) => item.isActive !== false),
+    [products]
+  );
+  const activeCustomers = useMemo(
+    () => customers.filter((item) => item.isActive !== false),
+    [customers]
+  );
+  const activeSampleTypes = useMemo(
+    () => sampleTypes.filter((item) => item.isActive !== false),
+    [sampleTypes]
+  );
+  const activeStorageConditions = useMemo(
+    () => storageConditions.filter((item) => item.isActive !== false),
+    [storageConditions]
+  );
 
   const analysts = useMemo(
     () => users.filter((u) => u.isActive !== false && ["analyst", "qc", "admin"].includes(u.role)),
@@ -155,21 +222,25 @@ export default function SamplesPage() {
   );
 
   const filtered = useMemo(() => {
-    return data.filter((sample) => {
+    return activeSamples.filter((sample) => {
       const q = debounced.trim().toLowerCase();
       const matchesSearch =
         !q ||
         sample.sampleNumber.toLowerCase().includes(q) ||
         (sample.productName || "").toLowerCase().includes(q) ||
+        (sample.customerName || "").toLowerCase().includes(q) ||
         (sample.batchNumber || "").toLowerCase().includes(q) ||
-        (sample.assignedAnalystName || "").toLowerCase().includes(q);
+        (sample.lotNumber || "").toLowerCase().includes(q) ||
+        (sample.barcode || "").toLowerCase().includes(q) ||
+        (sample.assignedAnalystName || "").toLowerCase().includes(q) ||
+        (sample.storageConditionName || "").toLowerCase().includes(q);
       const matchesStatus =
         statusFilter === "all" || sample.status === statusFilter;
       const matchesPriority =
         priorityFilter === "all" || sample.priority === priorityFilter;
       return matchesSearch && matchesStatus && matchesPriority;
     });
-  }, [data, debounced, statusFilter, priorityFilter]);
+  }, [activeSamples, debounced, statusFilter, priorityFilter]);
 
   const { page, setPage, totalPages, pageItems, total } = usePagination(
     filtered,
@@ -187,14 +258,25 @@ export default function SamplesPage() {
     }).then(setQrDataUrl);
   }, [detail]);
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("action") === "create" && hasPermission("manageSamples")) {
+      openCreate();
+    }
+    // Run once on mount for deep-link support.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const openCreate = () => {
+    setEditing(null);
     form.reset({
-      receivedDate: new Date().toISOString().slice(0, 10),
+      receivedDate: formatLocalDateKey(),
       priority: "normal",
       status: "received",
       productId: "",
       customerId: "",
       sampleTypeId: "",
+      storageConditionId: "",
       batchNumber: "",
       lotNumber: "",
       quantity: "",
@@ -206,12 +288,109 @@ export default function SamplesPage() {
     setOpen(true);
   };
 
+  const openEdit = (sample: Sample) => {
+    setEditing(sample);
+    form.reset({
+      productId: sample.productId || "",
+      customerId: sample.customerId || "",
+      sampleTypeId: sample.sampleTypeId || "",
+      storageConditionId: sample.storageConditionId || "",
+      batchNumber: sample.batchNumber || "",
+      lotNumber: sample.lotNumber || "",
+      quantity: sample.quantity ? String(sample.quantity) : "",
+      receivedDate: sample.receivedDate,
+      dueDate: sample.dueDate || "",
+      priority: sample.priority,
+      status: sample.status,
+      assignedAnalystId: sample.assignedAnalystId || "",
+      remarks: sample.remarks || "",
+    });
+    setPendingFiles([]);
+    setOpen(true);
+  };
+
   const onSubmit = form.handleSubmit(async (values) => {
     setSaving(true);
     try {
-      const product = products.find((p) => p.id === values.productId);
-      const customer = customers.find((c) => c.id === values.customerId);
+      const product = activeProducts.find((p) => p.id === values.productId);
+      const customer = activeCustomers.find((c) => c.id === values.customerId);
+      const storage = activeStorageConditions.find(
+        (s) => s.id === values.storageConditionId
+      );
       const analyst = analysts.find((a) => a.id === values.assignedAnalystId);
+
+      if (editing) {
+        const newAttachments = [];
+        for (const file of pendingFiles) {
+          const path = `samples/${editing.sampleNumber}/${Date.now()}-${file.name}`;
+          const uploaded = await uploadFile(path, file);
+          newAttachments.push({
+            id: `${Date.now()}-${file.name}`,
+            name: file.name,
+            url: uploaded.url,
+            contentType: file.type,
+            size: file.size,
+            uploadedAt: new Date().toISOString(),
+            uploadedBy: profile?.uid,
+          });
+        }
+
+        const previousAnalystId = editing.assignedAnalystId;
+        await updateDocument(COLLECTIONS.samples, editing.id, {
+          productId: values.productId || undefined,
+          productName: product?.name,
+          customerId: values.customerId || undefined,
+          customerName: customer?.name,
+          sampleTypeId: values.sampleTypeId || undefined,
+          storageConditionId: values.storageConditionId || undefined,
+          storageConditionName: storage?.name,
+          batchNumber: values.batchNumber || undefined,
+          lotNumber: values.lotNumber || undefined,
+          quantity: values.quantity ? Number(values.quantity) : undefined,
+          receivedDate: values.receivedDate,
+          dueDate: values.dueDate || undefined,
+          priority: values.priority,
+          status: values.status,
+          assignedAnalystId: values.assignedAnalystId || undefined,
+          assignedAnalystName: analyst?.displayName,
+          remarks: values.remarks || undefined,
+          attachments: [...(editing.attachments || []), ...newAttachments],
+          updatedBy: profile?.uid,
+        });
+        await logActivity({
+          action: "Update Sample",
+          entityType: "samples",
+          entityId: editing.id,
+          entityLabel: editing.sampleNumber,
+          userId: profile?.uid || "",
+          userName: profile?.displayName || "User",
+          userEmail: profile?.email,
+        });
+        await logAudit({
+          entityType: "samples",
+          entityId: editing.id,
+          entityLabel: editing.sampleNumber,
+          field: "record",
+          oldValue: editing.status,
+          newValue: values.status,
+          userId: profile?.uid || "",
+          userName: profile?.displayName || "User",
+          action: "update",
+        });
+        if (
+          analyst?.uid &&
+          values.assignedAnalystId &&
+          values.assignedAnalystId !== previousAnalystId
+        ) {
+          await notifySampleAssigned(analyst.uid, editing.sampleNumber);
+        }
+        toast.success(`Sample ${editing.sampleNumber} updated`);
+        setOpen(false);
+        setEditing(null);
+        setRefreshKey((k) => k + 1);
+        return;
+      }
+
       let sampleNumber = generateSampleNumber();
       try {
         sampleNumber = await getNextSequence("samples", "SMP");
@@ -234,7 +413,7 @@ export default function SamplesPage() {
         });
       }
 
-      const payload: Omit<Sample, "id"> = {
+      const payload = {
         sampleNumber,
         barcode,
         productId: values.productId || undefined,
@@ -242,22 +421,21 @@ export default function SamplesPage() {
         customerId: values.customerId || undefined,
         customerName: customer?.name,
         sampleTypeId: values.sampleTypeId || undefined,
+        storageConditionId: values.storageConditionId || undefined,
+        storageConditionName: storage?.name,
         batchNumber: values.batchNumber || undefined,
         lotNumber: values.lotNumber || undefined,
         quantity: values.quantity ? Number(values.quantity) : undefined,
         receivedDate: values.receivedDate,
         dueDate: values.dueDate || undefined,
         priority: values.priority as Priority,
-        status: values.status as SampleStatus,
+        status: "received" as SampleStatus,
         assignedAnalystId: values.assignedAnalystId || undefined,
         assignedAnalystName: analyst?.displayName,
         remarks: values.remarks || undefined,
         attachments,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
         createdBy: profile?.uid,
         updatedBy: profile?.uid,
-        isActive: true,
       };
 
       const id = await createDocument(COLLECTIONS.samples, payload);
@@ -281,6 +459,9 @@ export default function SamplesPage() {
         userName: profile?.displayName || "User",
         action: "create",
       });
+      if (analyst?.uid) {
+        await notifySampleAssigned(analyst.uid, sampleNumber);
+      }
       toast.success(`Sample ${sampleNumber} created`);
       setOpen(false);
       setRefreshKey((k) => k + 1);
@@ -295,9 +476,9 @@ export default function SamplesPage() {
     if (!deleteTarget) return;
     setDeleting(true);
     try {
-      await hardDeleteDocument(COLLECTIONS.samples, deleteTarget.id);
+      await softDeleteDocument(COLLECTIONS.samples, deleteTarget.id);
       await logActivity({
-        action: "Delete Sample",
+        action: "Archive Sample",
         entityType: "samples",
         entityId: deleteTarget.id,
         entityLabel: deleteTarget.sampleNumber,
@@ -305,11 +486,22 @@ export default function SamplesPage() {
         userName: profile?.displayName || "User",
         userEmail: profile?.email,
       });
-      toast.success("Sample deleted");
+      await logAudit({
+        entityType: "samples",
+        entityId: deleteTarget.id,
+        entityLabel: deleteTarget.sampleNumber,
+        field: "isActive",
+        oldValue: "true",
+        newValue: "false",
+        userId: profile?.uid || "",
+        userName: profile?.displayName || "User",
+        action: "delete",
+      });
+      toast.success("Sample archived");
       setDeleteTarget(null);
       setRefreshKey((k) => k + 1);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Delete failed");
+      toast.error(err instanceof Error ? err.message : "Archive failed");
     } finally {
       setDeleting(false);
     }
@@ -420,6 +612,13 @@ export default function SamplesPage() {
         </Select>
       </div>
 
+      {activeSamples.length >= SAMPLE_FETCH_LIMIT && (
+        <p className="mb-4 text-sm text-muted-foreground">
+          Showing the latest {SAMPLE_FETCH_LIMIT.toLocaleString()} samples. Older
+          records may not appear in this list.
+        </p>
+      )}
+
       {loading ? (
         <TableSkeleton />
       ) : error ? (
@@ -448,6 +647,7 @@ export default function SamplesPage() {
                   <TableHead>Priority</TableHead>
                   <TableHead>Analyst</TableHead>
                   <TableHead>Received</TableHead>
+                  <TableHead>Due</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -466,6 +666,22 @@ export default function SamplesPage() {
                     </TableCell>
                     <TableCell>{sample.assignedAnalystName || "—"}</TableCell>
                     <TableCell>{formatDate(sample.receivedDate)}</TableCell>
+                    <TableCell>
+                      {sample.dueDate ? (
+                        <span
+                          className={
+                            isSampleOverdue(sample)
+                              ? "font-medium text-rose-600 dark:text-rose-400"
+                              : undefined
+                          }
+                        >
+                          {formatDate(sample.dueDate)}
+                          {isSampleOverdue(sample) ? " · Overdue" : ""}
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </TableCell>
                     <TableCell className="text-right">
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
@@ -478,6 +694,12 @@ export default function SamplesPage() {
                             <Eye className="mr-2 size-4" />
                             Details
                           </DropdownMenuItem>
+                          {hasPermission("manageSamples") && (
+                            <DropdownMenuItem onClick={() => openEdit(sample)}>
+                              <Pencil className="mr-2 size-4" />
+                              Edit
+                            </DropdownMenuItem>
+                          )}
                           <DropdownMenuItem asChild>
                             <Link href={`/testing?sample=${sample.id}`}>
                               Create Test
@@ -489,7 +711,7 @@ export default function SamplesPage() {
                               onClick={() => setDeleteTarget(sample)}
                             >
                               <Trash2 className="mr-2 size-4" />
-                              Delete
+                              Archive
                             </DropdownMenuItem>
                           )}
                         </DropdownMenuContent>
@@ -526,10 +748,18 @@ export default function SamplesPage() {
         </div>
       )}
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog
+        open={open}
+        onOpenChange={(value) => {
+          setOpen(value);
+          if (!value) setEditing(null);
+        }}
+      >
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
-            <DialogTitle>Register Sample</DialogTitle>
+            <DialogTitle>
+              {editing ? `Edit Sample ${editing.sampleNumber}` : "Register Sample"}
+            </DialogTitle>
           </DialogHeader>
           <form className="grid gap-4 md:grid-cols-2" onSubmit={onSubmit}>
             <div className="space-y-2">
@@ -542,7 +772,7 @@ export default function SamplesPage() {
                   <SelectValue placeholder="Select product" />
                 </SelectTrigger>
                 <SelectContent>
-                  {products.map((p) => (
+                  {activeProducts.map((p) => (
                     <SelectItem key={p.id} value={p.id}>
                       {p.name}
                     </SelectItem>
@@ -560,7 +790,7 @@ export default function SamplesPage() {
                   <SelectValue placeholder="Select customer" />
                 </SelectTrigger>
                 <SelectContent>
-                  {customers.map((c) => (
+                  {activeCustomers.map((c) => (
                     <SelectItem key={c.id} value={c.id}>
                       {c.name}
                     </SelectItem>
@@ -578,9 +808,28 @@ export default function SamplesPage() {
                   <SelectValue placeholder="Select type" />
                 </SelectTrigger>
                 <SelectContent>
-                  {sampleTypes.map((t) => (
+                  {activeSampleTypes.map((t) => (
                     <SelectItem key={t.id} value={t.id}>
                       {t.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Storage Condition</Label>
+              <Select
+                value={form.watch("storageConditionId") || ""}
+                onValueChange={(v) => form.setValue("storageConditionId", v)}
+              >
+                <SelectTrigger className="rounded-xl">
+                  <SelectValue placeholder="Select storage" />
+                </SelectTrigger>
+                <SelectContent>
+                  {activeStorageConditions.map((s) => (
+                    <SelectItem key={s.id} value={s.id}>
+                      {s.name}
+                      {s.temperature ? ` (${s.temperature})` : ""}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -616,9 +865,16 @@ export default function SamplesPage() {
               <Label>Quantity</Label>
               <Input
                 type="number"
+                min="0"
+                step="any"
                 className="rounded-xl"
                 {...form.register("quantity")}
               />
+              {form.formState.errors.quantity && (
+                <p className="text-xs text-destructive">
+                  {form.formState.errors.quantity.message}
+                </p>
+              )}
             </div>
             <div className="space-y-2">
               <Label>Received Date *</Label>
@@ -627,11 +883,43 @@ export default function SamplesPage() {
                 className="rounded-xl"
                 {...form.register("receivedDate")}
               />
+              {form.formState.errors.receivedDate && (
+                <p className="text-xs text-destructive">
+                  {form.formState.errors.receivedDate.message}
+                </p>
+              )}
             </div>
             <div className="space-y-2">
               <Label>Due Date</Label>
               <Input type="date" className="rounded-xl" {...form.register("dueDate")} />
+              {form.formState.errors.dueDate && (
+                <p className="text-xs text-destructive">
+                  {form.formState.errors.dueDate.message}
+                </p>
+              )}
             </div>
+            {editing && (
+              <div className="space-y-2">
+                <Label>Status</Label>
+                <Select
+                  value={form.watch("status")}
+                  onValueChange={(v) =>
+                    form.setValue("status", v as FormValues["status"])
+                  }
+                >
+                  <SelectTrigger className="rounded-xl">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {Object.entries(SAMPLE_STATUS_LABELS).map(([value, label]) => (
+                      <SelectItem key={value} value={value}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
             <div className="space-y-2">
               <Label>Priority</Label>
               <Select
@@ -679,7 +967,11 @@ export default function SamplesPage() {
                 Cancel
               </Button>
               <Button type="submit" disabled={saving} className="rounded-xl">
-                {saving ? "Saving..." : "Create Sample"}
+                {saving
+                  ? "Saving..."
+                  : editing
+                    ? "Save Changes"
+                    : "Create Sample"}
               </Button>
             </DialogFooter>
           </form>
@@ -703,8 +995,43 @@ export default function SamplesPage() {
                   {detail.customerName || "—"}
                 </p>
                 <p>
-                  <span className="text-muted-foreground">Batch:</span>{" "}
-                  {detail.batchNumber || "—"}
+                  <span className="text-muted-foreground">Sample Type:</span>{" "}
+                  {activeSampleTypes.find((t) => t.id === detail.sampleTypeId)?.name ||
+                    "—"}
+                </p>
+                <p>
+                  <span className="text-muted-foreground">Storage:</span>{" "}
+                  {detail.storageConditionName ||
+                    activeStorageConditions.find(
+                      (s) => s.id === detail.storageConditionId
+                    )?.name ||
+                    "—"}
+                </p>
+                <p>
+                  <span className="text-muted-foreground">Batch / Lot:</span>{" "}
+                  {[detail.batchNumber, detail.lotNumber].filter(Boolean).join(" / ") ||
+                    "—"}
+                </p>
+                <p>
+                  <span className="text-muted-foreground">Received:</span>{" "}
+                  {formatDate(detail.receivedDate)}
+                </p>
+                <p>
+                  <span className="text-muted-foreground">Due:</span>{" "}
+                  {detail.dueDate ? (
+                    <span
+                      className={
+                        isSampleOverdue(detail)
+                          ? "font-medium text-rose-600 dark:text-rose-400"
+                          : undefined
+                      }
+                    >
+                      {formatDate(detail.dueDate)}
+                      {isSampleOverdue(detail) ? " (Overdue)" : ""}
+                    </span>
+                  ) : (
+                    "—"
+                  )}
                 </p>
                 <p>
                   <span className="text-muted-foreground">Status:</span>{" "}
@@ -722,6 +1049,25 @@ export default function SamplesPage() {
                   <span className="text-muted-foreground">Remarks:</span>{" "}
                   {detail.remarks || "—"}
                 </p>
+                {(detail.attachments?.length ?? 0) > 0 && (
+                  <div>
+                    <p className="mb-1 text-muted-foreground">Attachments:</p>
+                    <ul className="space-y-1">
+                      {detail.attachments.map((file) => (
+                        <li key={file.id}>
+                          <a
+                            href={file.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-primary hover:underline"
+                          >
+                            {file.name}
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
               <div className="flex flex-col items-center gap-4 rounded-2xl border bg-muted/20 p-4">
                 {qrDataUrl && (
@@ -744,9 +1090,9 @@ export default function SamplesPage() {
       <ConfirmDialog
         open={!!deleteTarget}
         onOpenChange={(v) => !v && setDeleteTarget(null)}
-        title="Delete sample?"
-        description="This permanently removes the sample record."
-        confirmLabel="Delete"
+        title="Archive sample?"
+        description="This hides the sample from active lists while keeping audit history."
+        confirmLabel="Archive"
         destructive
         loading={deleting}
         onConfirm={remove}

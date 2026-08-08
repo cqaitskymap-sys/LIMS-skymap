@@ -2,27 +2,36 @@
 
 import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Search } from "lucide-react";
-import { COLLECTIONS } from "@/lib/constants";
-import { listDocumentsSafe } from "@/lib/firebase/firestore";
 import { useDebouncedValue } from "@/hooks/use-firestore";
+import {
+  buildSearchResults,
+  fetchSearchCatalog,
+  MIN_SEARCH_LENGTH,
+  SEARCH_FETCH_LIMIT,
+  SEARCH_RESULT_PREVIEW,
+  type SearchCatalog,
+} from "@/lib/search";
 import { PageHeader } from "@/components/shared/page-header";
-import { EmptyState, PageShell, TableSkeleton } from "@/components/shared/states";
+import {
+  EmptyState,
+  ErrorState,
+  PageShell,
+  TableSkeleton,
+} from "@/components/shared/states";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import type { Customer, LabTest, Product, Report, Sample } from "@/types";
 
 function SearchContent() {
+  const router = useRouter();
   const params = useSearchParams();
   const [query, setQuery] = useState(params.get("q") || "");
   const debounced = useDebouncedValue(query, 350);
-  const [loading, setLoading] = useState(false);
-  const [samples, setSamples] = useState<Sample[]>([]);
-  const [tests, setTests] = useState<LabTest[]>([]);
-  const [reports, setReports] = useState<Report[]>([]);
-  const [products, setProducts] = useState<Product[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [catalog, setCatalog] = useState<SearchCatalog | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     setQuery(params.get("q") || "");
@@ -30,88 +39,55 @@ function SearchContent() {
 
   useEffect(() => {
     let active = true;
-    const run = async () => {
-      if (debounced.trim().length < 2) {
-        setSamples([]);
-        setTests([]);
-        setReports([]);
-        setProducts([]);
-        setCustomers([]);
-        return;
-      }
-      setLoading(true);
-      try {
-        const [s, t, r, p, c] = await Promise.all([
-          listDocumentsSafe<Sample>(COLLECTIONS.samples),
-          listDocumentsSafe<LabTest>(COLLECTIONS.tests),
-          listDocumentsSafe<Report>(COLLECTIONS.reports),
-          listDocumentsSafe<Product>(COLLECTIONS.products),
-          listDocumentsSafe<Customer>(COLLECTIONS.customers),
-        ]);
-        if (!active) return;
-        const q = debounced.toLowerCase();
-        setSamples(
-          s.filter(
-            (x) =>
-              x.sampleNumber.toLowerCase().includes(q) ||
-              (x.productName || "").toLowerCase().includes(q) ||
-              (x.batchNumber || "").toLowerCase().includes(q)
-          )
-        );
-        setTests(
-          t.filter(
-            (x) =>
-              x.testNumber.toLowerCase().includes(q) ||
-              x.testName.toLowerCase().includes(q) ||
-              x.sampleNumber.toLowerCase().includes(q)
-          )
-        );
-        setReports(
-          r.filter(
-            (x) =>
-              x.reportNumber.toLowerCase().includes(q) ||
-              x.title.toLowerCase().includes(q)
-          )
-        );
-        setProducts(
-          p.filter(
-            (x) =>
-              x.name.toLowerCase().includes(q) ||
-              x.code.toLowerCase().includes(q)
-          )
-        );
-        setCustomers(
-          c.filter(
-            (x) =>
-              x.name.toLowerCase().includes(q) ||
-              x.code.toLowerCase().includes(q)
-          )
-        );
-      } finally {
+    setLoading(true);
+    setError(null);
+    fetchSearchCatalog()
+      .then((data) => {
+        if (active) setCatalog(data);
+      })
+      .catch((err: Error) => {
+        if (active) setError(err.message || "Failed to load search data");
+      })
+      .finally(() => {
         if (active) setLoading(false);
-      }
-    };
-    run();
+      });
     return () => {
       active = false;
     };
-  }, [debounced]);
+  }, [refreshKey]);
+
+  useEffect(() => {
+    const next = debounced.trim();
+    const current = params.get("q") || "";
+    if (next === current) return;
+    if (next.length >= MIN_SEARCH_LENGTH) {
+      router.replace(`/search?q=${encodeURIComponent(next)}`, { scroll: false });
+    } else if (current) {
+      router.replace("/search", { scroll: false });
+    }
+  }, [debounced, params, router]);
+
+  const resultGroups = useMemo(() => {
+    if (!catalog || debounced.trim().length < MIN_SEARCH_LENGTH) return [];
+    return buildSearchResults(catalog, debounced);
+  }, [catalog, debounced]);
 
   const total = useMemo(
-    () =>
-      samples.length +
-      tests.length +
-      reports.length +
-      products.length +
-      customers.length,
-    [samples, tests, reports, products, customers]
+    () => resultGroups.reduce((sum, group) => sum + group.items.length, 0),
+    [resultGroups]
   );
+
+  const isTruncated =
+    !!catalog &&
+    (catalog.samples.length >= SEARCH_FETCH_LIMIT ||
+      catalog.tests.length >= SEARCH_FETCH_LIMIT ||
+      catalog.reports.length >= SEARCH_FETCH_LIMIT);
 
   return (
     <PageShell>
       <PageHeader
         title="Search Everywhere"
-        description="Instant debounced search across samples, tests, reports, and masters."
+        description="Search across samples, tests, reports, and master data."
         breadcrumbs={[
           { label: "Dashboard", href: "/dashboard" },
           { label: "Search" },
@@ -128,22 +104,36 @@ function SearchContent() {
         />
       </div>
 
+      {isTruncated && debounced.trim().length >= MIN_SEARCH_LENGTH && (
+        <p className="mb-4 text-sm text-muted-foreground">
+          Results may be incomplete — search indexes the latest{" "}
+          {SEARCH_FETCH_LIMIT.toLocaleString()} records per module.
+        </p>
+      )}
+
       {loading ? (
         <TableSkeleton rows={4} />
-      ) : debounced.trim().length < 2 ? (
+      ) : error ? (
+        <ErrorState
+          title="Failed to load search"
+          description={error}
+          onRetry={() => setRefreshKey((k) => k + 1)}
+        />
+      ) : debounced.trim().length < MIN_SEARCH_LENGTH ? (
         <EmptyState
           title="Start typing to search"
-          description="Search sample numbers, tests, products, customers, and reports."
+          description="Search sample numbers, tests, reports, products, customers, materials, instruments, and other master records."
         />
       ) : total === 0 ? (
-        <EmptyState title="No matches found" />
+        <EmptyState
+          title="No matches found"
+          description={`No results for "${debounced.trim()}". Try another keyword.`}
+        />
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
-          <ResultCard title="Samples" href="/samples" items={samples.map((s) => ({ id: s.id, label: s.sampleNumber, meta: s.productName }))} />
-          <ResultCard title="Tests" href="/testing" items={tests.map((t) => ({ id: t.id, label: t.testNumber, meta: t.testName }))} />
-          <ResultCard title="Reports" href="/reports" items={reports.map((r) => ({ id: r.id, label: r.reportNumber, meta: r.title }))} />
-          <ResultCard title="Products" href="/masters/products" items={products.map((p) => ({ id: p.id, label: p.name, meta: p.code }))} />
-          <ResultCard title="Customers" href="/masters/customers" items={customers.map((c) => ({ id: c.id, label: c.name, meta: c.code }))} />
+          {resultGroups.map((group) => (
+            <ResultCard key={group.title} {...group} query={debounced.trim()} />
+          ))}
         </div>
       )}
     </PageShell>
@@ -154,27 +144,30 @@ function ResultCard({
   title,
   href,
   items,
+  query,
 }: {
   title: string;
   href: string;
   items: { id: string; label: string; meta?: string }[];
+  query: string;
 }) {
-  if (!items.length) return null;
+  const moduleHref = `${href}?q=${encodeURIComponent(query)}`;
+
   return (
     <Card className="rounded-2xl soft-shadow">
       <CardHeader className="flex-row items-center justify-between">
         <CardTitle className="text-base">
           {title} ({items.length})
         </CardTitle>
-        <Link href={href} className="text-sm text-primary hover:underline">
-          Open
+        <Link href={moduleHref} className="text-sm text-primary hover:underline">
+          View all
         </Link>
       </CardHeader>
       <CardContent className="space-y-2">
-        {items.slice(0, 8).map((item) => (
+        {items.slice(0, SEARCH_RESULT_PREVIEW).map((item) => (
           <Link
             key={item.id}
-            href={href}
+            href={moduleHref}
             className="block rounded-xl border px-3 py-2 transition hover:bg-muted/40"
           >
             <p className="text-sm font-medium">{item.label}</p>
@@ -183,6 +176,11 @@ function ResultCard({
             )}
           </Link>
         ))}
+        {items.length > SEARCH_RESULT_PREVIEW && (
+          <p className="pt-1 text-xs text-muted-foreground">
+            +{items.length - SEARCH_RESULT_PREVIEW} more in {title}
+          </p>
+        )}
       </CardContent>
     </Card>
   );
